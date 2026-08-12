@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '../db';
+import { query, queryOne, execute } from '../db';
 import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -29,29 +29,43 @@ const statusSchema = z.object({
   status: z.enum(['ENABLED', 'DISABLED'], { message: '状态必须为 ENABLED 或 DISABLED' }),
 });
 
+// 将行的 categoryName 字段转换为嵌套 category 结构（兼容 Prisma 返回格式）
+function formatDish(dish: any) {
+  const { categoryName, ...rest } = dish;
+  return {
+    ...rest,
+    category: categoryName ? { id: rest.categoryId, name: categoryName } : null,
+  };
+}
+
+const DISH_SELECT_SQL = `SELECT d.*, c.name as categoryName FROM Dish d LEFT JOIN Category c ON c.id = d.categoryId`;
+
 // GET /api/dishes - 获取菜品列表
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
     const { categoryId, status } = req.query;
-    const where: any = {};
+    let sql = DISH_SELECT_SQL;
+    const where: string[] = [];
+    const params: any[] = [];
 
     if (categoryId) {
       const catId = parseInt(categoryId as string, 10);
       if (!isNaN(catId)) {
-        where.categoryId = catId;
+        where.push('d.categoryId = ?');
+        params.push(catId);
       }
     }
 
     if (status && (status === 'ENABLED' || status === 'DISABLED')) {
-      where.status = status as string;
+      where.push('d.status = ?');
+      params.push(status as string);
     }
 
-    const dishes = await prisma.dish.findMany({
-      where,
-      orderBy: [{ sort: 'asc' }, { id: 'asc' }],
-      include: { category: { select: { id: true, name: true } } },
-    });
-    res.json(dishes);
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY d.sort ASC, d.id ASC';
+
+    const dishes = await query<any[]>(sql, params);
+    res.json((dishes || []).map(formatDish));
   } catch (error) {
     console.error('获取菜品列表失败:', error);
     res.status(500).json({ error: '获取菜品列表失败' });
@@ -66,14 +80,11 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const dish = await prisma.dish.findUnique({
-      where: { id },
-      include: { category: { select: { id: true, name: true } } },
-    });
+    const dish = await queryOne<any>(`${DISH_SELECT_SQL} WHERE d.id = ?`, [id]);
     if (!dish) {
       return res.status(404).json({ error: '菜品不存在' });
     }
-    res.json(dish);
+    res.json(formatDish(dish));
   } catch (error) {
     console.error('获取菜品失败:', error);
     res.status(500).json({ error: '获取菜品失败' });
@@ -89,13 +100,26 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 
   try {
     // 验证分类存在
-    const category = await prisma.category.findUnique({ where: { id: result.data.categoryId } });
+    const category = await queryOne('SELECT id FROM Category WHERE id = ?', [result.data.categoryId]);
     if (!category) {
       return res.status(400).json({ error: '分类不存在' });
     }
 
-    const dish = await prisma.dish.create({ data: result.data });
-    res.status(201).json(dish);
+    const r = await execute(
+      'INSERT INTO Dish (name, difficulty, duration, description, image, status, sort, categoryId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        result.data.name,
+        result.data.difficulty,
+        result.data.duration,
+        result.data.description,
+        result.data.image,
+        'ENABLED',
+        result.data.sort,
+        result.data.categoryId,
+      ]
+    );
+    const dish = await queryOne<any>(`${DISH_SELECT_SQL} WHERE d.id = ?`, [r.insertId]);
+    res.status(201).json(formatDish(dish));
   } catch (error) {
     console.error('创建菜品失败:', error);
     res.status(500).json({ error: '创建菜品失败' });
@@ -115,22 +139,57 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    if (result.data.categoryId) {
-      const category = await prisma.category.findUnique({ where: { id: result.data.categoryId } });
+    const existing = await queryOne('SELECT id FROM Dish WHERE id = ?', [id]);
+    if (!existing) {
+      return res.status(404).json({ error: '菜品不存在' });
+    }
+
+    if (result.data.categoryId !== undefined) {
+      const category = await queryOne('SELECT id FROM Category WHERE id = ?', [result.data.categoryId]);
       if (!category) {
         return res.status(400).json({ error: '分类不存在' });
       }
     }
 
-    const dish = await prisma.dish.update({
-      where: { id },
-      data: result.data,
-    });
-    res.json(dish);
-  } catch (error: any) {
-    if (error.code === 'P2025') {
-      return res.status(404).json({ error: '菜品不存在' });
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (result.data.name !== undefined) {
+      sets.push('name = ?');
+      params.push(result.data.name);
     }
+    if (result.data.difficulty !== undefined) {
+      sets.push('difficulty = ?');
+      params.push(result.data.difficulty);
+    }
+    if (result.data.duration !== undefined) {
+      sets.push('duration = ?');
+      params.push(result.data.duration);
+    }
+    if (result.data.description !== undefined) {
+      sets.push('description = ?');
+      params.push(result.data.description);
+    }
+    if (result.data.image !== undefined) {
+      sets.push('image = ?');
+      params.push(result.data.image);
+    }
+    if (result.data.categoryId !== undefined) {
+      sets.push('categoryId = ?');
+      params.push(result.data.categoryId);
+    }
+    if (result.data.sort !== undefined) {
+      sets.push('sort = ?');
+      params.push(result.data.sort);
+    }
+
+    if (sets.length > 0) {
+      params.push(id);
+      await execute(`UPDATE Dish SET ${sets.join(', ')} WHERE id = ?`, params);
+    }
+
+    const dish = await queryOne<any>(`${DISH_SELECT_SQL} WHERE d.id = ?`, [id]);
+    res.json(formatDish(dish));
+  } catch (error: any) {
     console.error('更新菜品失败:', error);
     res.status(500).json({ error: '更新菜品失败' });
   }
@@ -149,15 +208,13 @@ router.patch('/:id/status', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const dish = await prisma.dish.update({
-      where: { id },
-      data: { status: result.data.status },
-    });
-    res.json(dish);
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    const r = await execute('UPDATE Dish SET status = ? WHERE id = ?', [result.data.status, id]);
+    if (r.affectedRows === 0) {
       return res.status(404).json({ error: '菜品不存在' });
     }
+    const dish = await queryOne<any>(`${DISH_SELECT_SQL} WHERE d.id = ?`, [id]);
+    res.json(formatDish(dish));
+  } catch (error: any) {
     console.error('更新菜品状态失败:', error);
     res.status(500).json({ error: '更新菜品状态失败' });
   }
@@ -171,12 +228,12 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    await prisma.dish.delete({ where: { id } });
-    res.json({ message: '删除成功' });
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    const r = await execute('DELETE FROM Dish WHERE id = ?', [id]);
+    if (r.affectedRows === 0) {
       return res.status(404).json({ error: '菜品不存在' });
     }
+    res.json({ message: '删除成功' });
+  } catch (error: any) {
     console.error('删除菜品失败:', error);
     res.status(500).json({ error: '删除菜品失败' });
   }

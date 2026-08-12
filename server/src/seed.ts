@@ -1,4 +1,4 @@
-import { prisma } from './db';
+import { initDatabase, execute } from './db';
 
 interface DishDef {
   name: string;
@@ -8,23 +8,21 @@ interface DishDef {
 
 export async function seedData() {
   // 清空旧数据
-  await prisma.order.deleteMany();
-  await prisma.dish.deleteMany();
-  await prisma.category.deleteMany();
-  await prisma.phoneWhitelist.deleteMany();
+  await execute('DELETE FROM `Order`');
+  await execute('DELETE FROM Dish');
+  await execute('DELETE FROM Category');
+  await execute('DELETE FROM PhoneWhitelist');
 
   // 默认白名单用户
-  await prisma.phoneWhitelist.create({
-    data: { phone: '18977524719', name: '默认顾客' },
-  });
+  await execute('INSERT INTO PhoneWhitelist (phone, name) VALUES (?, ?)', ['18977524719', '默认顾客']);
 
   // 创建分类
   const CATS = {
-    SIG: await prisma.category.create({ data: { name: '招牌推荐', sort: 1 } }),
-    HOT: await prisma.category.create({ data: { name: '热菜', sort: 2 } }),
-    COLD: await prisma.category.create({ data: { name: '凉菜冷盘', sort: 3 } }),
-    RICE: await prisma.category.create({ data: { name: '米饭粥类', sort: 4 } }),
-    DRINK: await prisma.category.create({ data: { name: '饮品甜点', sort: 5 } }),
+    SIG: { id: (await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', ['招牌推荐', 1])).insertId },
+    HOT: { id: (await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', ['热菜', 2])).insertId },
+    COLD: { id: (await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', ['凉菜冷盘', 3])).insertId },
+    RICE: { id: (await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', ['米饭粥类', 4])).insertId },
+    DRINK: { id: (await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', ['饮品甜点', 5])).insertId },
   };
 
   // ============================================================
@@ -1115,7 +1113,10 @@ export async function seedData() {
   addDishes(soupDishes, CATS.DRINK.id);
 
   for (const d of allDishes) {
-    await prisma.dish.create({ data: d });
+    await execute(
+      'INSERT INTO Dish (name, difficulty, duration, description, image, status, sort, categoryId) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [d.name, d.difficulty, d.duration, '', '', 'ENABLED', d.sort, d.categoryId]
+    );
   }
 
   console.log(`Seed data created: ${allDishes.length} dishes in 5 categories`);
@@ -1123,5 +1124,10 @@ export async function seedData() {
 
 // 命令行直接运行: npx tsx src/seed.ts
 if (require.main === module) {
-  seedData().catch(e => { console.error(e); process.exit(1); }).finally(() => prisma.$disconnect());
+  initDatabase()
+    .then(() => seedData())
+    .catch(e => {
+      console.error(e);
+      process.exit(1);
+    });
 }

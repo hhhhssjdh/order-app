@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { authMiddleware } from './middleware/auth';
-import { prisma, initDatabase } from './db';
+import { initDatabase, query } from './db';
 import { seedData } from './seed';
 import authRouter from './controllers/auth';
 import categoryRouter from './controllers/category';
@@ -83,7 +83,8 @@ async function bootstrap() {
   } else {
     try {
       // 检查是否有数据
-      const categoryCount = await prisma.category.count().catch(() => -1);
+      const rows = await query('SELECT COUNT(*) as cnt FROM Category').catch(() => null);
+      const categoryCount = rows ? Number((rows as any[])[0]?.cnt ?? 0) : -1;
       if (categoryCount === -1) {
         console.log('[init] 表结构未就绪，跳过自动初始化');
       } else if (categoryCount === 0) {

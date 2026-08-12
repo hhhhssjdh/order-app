@@ -1,27 +1,18 @@
-// 数据库连接组装 + 自动建库建表（适配微信云托管环境变量）
+// 数据库连接层：使用 mysql2 连接池（替代 Prisma，兼容微信云托管环境）
 import mysql from 'mysql2/promise';
 
-// 在模块加载时组装 DATABASE_URL（云托管环境变量）
-function buildDatabaseUrl(): string {
-  // 如果已有完整 DATABASE_URL 直接用
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-  // 云托管提供 MYSQL_ADDRESS / MYSQL_USERNAME / MYSQL_PASSWORD
+// 在模块加载时组装连接配置（云托管环境变量）
+function getMysqlConfig() {
   const { MYSQL_ADDRESS = 'localhost:3306', MYSQL_USERNAME = 'root', MYSQL_PASSWORD = '', MYSQL_DATABASE = 'order_app' } = process.env;
   const [host, port] = MYSQL_ADDRESS.split(':');
-  const user = encodeURIComponent(MYSQL_USERNAME);
-  const pass = encodeURIComponent(MYSQL_PASSWORD);
-  return `mysql://${user}:${pass}@${host}:${port}/${MYSQL_DATABASE}?connection_limit=5`;
+  return { host, port: parseInt(port, 10), user: MYSQL_USERNAME, password: MYSQL_PASSWORD, database: MYSQL_DATABASE };
 }
 
 function getDatabaseName(): string {
-  if (process.env.DATABASE_URL) {
-    const m = process.env.DATABASE_URL.match(/\/([^/?]+)(\?|$)/);
-    if (m) return m[1];
-  }
   return process.env.MYSQL_DATABASE || 'order_app';
 }
 
-// 建表 SQL（Prisma CLI 无法读取云托管 MYSQL_* 变量，改用 mysql2 直连建表）
+// 建表 SQL（CREATE TABLE IF NOT EXISTS 幂等）
 const CREATE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS \`Category\` (
   \`id\` INTEGER NOT NULL AUTO_INCREMENT,
@@ -65,23 +56,15 @@ CREATE TABLE IF NOT EXISTS \`Order\` (
   \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (\`id\`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
-ALTER TABLE \`Dish\` ADD CONSTRAINT \`Dish_categoryId_fkey\` FOREIGN KEY (\`categoryId\`) REFERENCES \`Category\`(\`id\`) ON DELETE RESTRICT ON UPDATE CASCADE;
 `;
 
-// 初始化数据库：建库 + 建表（幂等）
+// 初始化数据库：建库 + 建表（幂等，mysql2 直连，不依赖 Prisma CLI）
 export async function initDatabase(): Promise<void> {
-  const { MYSQL_ADDRESS = 'localhost:3306', MYSQL_USERNAME = 'root', MYSQL_PASSWORD = '' } = process.env;
-  const [host, port] = MYSQL_ADDRESS.split(':');
+  const { host, port, user, password } = getMysqlConfig();
   const dbName = getDatabaseName();
 
-  // 连接时不指定数据库，先创建数据库
-  const conn = await mysql.createConnection({
-    host,
-    port: parseInt(port, 10),
-    user: MYSQL_USERNAME,
-    password: MYSQL_PASSWORD,
-  });
+  // 1. 连接时不指定数据库，先创建数据库
+  const conn = await mysql.createConnection({ host, port, user, password });
   try {
     await conn.query(
       `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`
@@ -91,15 +74,8 @@ export async function initDatabase(): Promise<void> {
     await conn.end();
   }
 
-  // 连接目标数据库建表（CREATE TABLE IF NOT EXISTS 幂等）
-  const dbConn = await mysql.createConnection({
-    host,
-    port: parseInt(port, 10),
-    user: MYSQL_USERNAME,
-    password: MYSQL_PASSWORD,
-    database: dbName,
-    multipleStatements: true,
-  });
+  // 2. 连接目标数据库建表
+  const dbConn = await mysql.createConnection({ host, port, user, password, database: dbName, multipleStatements: true });
   try {
     await dbConn.query(CREATE_TABLES_SQL);
     console.log('[db] 数据表已就绪');
@@ -108,7 +84,38 @@ export async function initDatabase(): Promise<void> {
   }
 }
 
-process.env.DATABASE_URL = buildDatabaseUrl();
+// 连接池（应用运行时统一使用）
+let pool: mysql.Pool | null = null;
 
-import { PrismaClient } from '@prisma/client';
-export const prisma = new PrismaClient();
+export function getPool(): mysql.Pool {
+  if (!pool) {
+    const { host, port, user, password, database } = getMysqlConfig();
+    pool = mysql.createPool({
+      host,
+      port,
+      user,
+      password,
+      database,
+      connectionLimit: 5,
+      waitForConnections: true,
+      charset: 'utf8mb4',
+    });
+  }
+  return pool;
+}
+
+// 便捷查询助手
+export async function query<T = any>(sql: string, params?: any[]): Promise<T> {
+  const [rows] = await getPool().execute(sql, params);
+  return rows as T;
+}
+
+export async function queryOne<T = any>(sql: string, params?: any[]): Promise<T | null> {
+  const rows = await query<T[]>(sql, params);
+  return rows.length > 0 ? rows[0] : null;
+}
+
+export async function execute(sql: string, params?: any[]): Promise<mysql.ResultSetHeader> {
+  const [result] = await getPool().execute(sql, params);
+  return result as mysql.ResultSetHeader;
+}

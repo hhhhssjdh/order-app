@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import { prisma } from '../db';
+import { queryOne } from '../db';
 
 const router = Router();
 
@@ -34,7 +34,7 @@ router.post('/phone-login', async (req: Request, res: Response) => {
   if (!result.success) return res.status(400).json({ error: '手机号格式不正确' });
   
   const { phone } = result.data;
-  const whitelisted = await prisma.phoneWhitelist.findUnique({ where: { phone } });
+  const whitelisted = await queryOne<any>('SELECT * FROM PhoneWhitelist WHERE phone = ?', [phone]);
   if (!whitelisted) return res.status(403).json({ error: '该手机号未被授权' });
   
   const token = jwt.sign({ role: 'user', phone }, JWT_SECRET, { expiresIn: '30d' });

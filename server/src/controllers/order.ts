@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '../db';
+import { query, queryOne, execute } from '../db';
 import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -34,9 +34,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   try {
     // 查询所有菜品当前价格
     const dishIds = items.map(item => item.dishId);
-    const dishes = await prisma.dish.findMany({
-      where: { id: { in: dishIds } },
-    });
+    // 注：mysql2 的 execute()（预编译）不支持 IN (?) 传数组展开，手动生成占位符
+    const placeholders = dishIds.map(() => '?').join(', ');
+    const dishes = await query<any[]>(`SELECT * FROM Dish WHERE id IN (${placeholders})`, dishIds);
 
     // 检查所有菜品是否存在
     if (dishes.length !== dishIds.length) {
@@ -62,17 +62,21 @@ router.post('/', async (req: AuthRequest, res: Response) => {
     const totalDifficulty = orderItems.reduce((sum, item) => sum + item.difficulty * item.quantity, 0);
     const totalDuration = orderItems.reduce((sum, item) => sum + item.duration * item.quantity, 0);
 
-    const order = await prisma.order.create({
-      data: {
-        tableNo,
-        items: JSON.stringify(orderItems),
-        totalPrice: totalDifficulty,  // totalPrice 字段复用为总难度
-        note,
-        status: 'PENDING',
-      },
-    });
+    // Order 是 MySQL 保留字，必须用反引号包裹
+    const r = await execute(
+      'INSERT INTO `Order` (tableNo, items, totalPrice, status, note) VALUES (?, ?, ?, ?, ?)',
+      [tableNo, JSON.stringify(orderItems), totalDifficulty, 'PENDING', note]
+    );
 
-    res.status(201).json(order);
+    res.status(201).json({
+      id: r.insertId,
+      tableNo,
+      items: orderItems,
+      totalPrice: totalDifficulty, // totalPrice 字段复用为总难度
+      status: 'PENDING',
+      note,
+      createdAt: new Date(),
+    });
   } catch (error) {
     console.error('创建订单失败:', error);
     res.status(500).json({ error: '创建订单失败' });
@@ -82,11 +86,9 @@ router.post('/', async (req: AuthRequest, res: Response) => {
 // GET /api/orders - 获取所有订单
 router.get('/', async (req: AuthRequest, res: Response) => {
   try {
-    const orders = await prisma.order.findMany({
-      orderBy: { createdAt: 'desc' },
-    });
+    const orders = await query<any[]>('SELECT * FROM `Order` ORDER BY createdAt DESC');
     // 返回时解析 items JSON
-    const parsed = orders.map(order => ({
+    const parsed = (orders || []).map(order => ({
       ...order,
       items: JSON.parse(order.items),
     }));
@@ -103,7 +105,7 @@ router.get('/:id', async (req: AuthRequest, res: Response) => {
   if (isNaN(id)) return res.status(400).json({ error: '无效的ID' });
 
   try {
-    const order = await prisma.order.findUnique({ where: { id } });
+    const order = await queryOne<any>('SELECT * FROM `Order` WHERE id = ?', [id]);
     if (!order) return res.status(404).json({ error: '订单不存在' });
     res.json({ ...order, items: JSON.parse(order.items) });
   } catch (error) {
@@ -125,15 +127,13 @@ router.patch('/:id/status', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const order = await prisma.order.update({
-      where: { id },
-      data: { status: result.data.status },
-    });
-    res.json(order);
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    const r = await execute('UPDATE `Order` SET status = ? WHERE id = ?', [result.data.status, id]);
+    if (r.affectedRows === 0) {
       return res.status(404).json({ error: '订单不存在' });
     }
+    const order = await queryOne<any>('SELECT * FROM `Order` WHERE id = ?', [id]);
+    res.json({ ...order, items: JSON.parse(order.items) });
+  } catch (error: any) {
     console.error('更新订单状态失败:', error);
     res.status(500).json({ error: '更新订单状态失败' });
   }

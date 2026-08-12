@@ -1,6 +1,6 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
-import { prisma } from '../db';
+import { query, queryOne, execute } from '../db';
 import { AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -15,17 +15,25 @@ const updateCategorySchema = z.object({
   sort: z.number().int().optional(),
 });
 
-// GET /api/categories - 获取所有分类
+// GET /api/categories - 获取所有分类（含菜品数量）
 router.get('/', async (_req: AuthRequest, res: Response) => {
   try {
-    const categories = await prisma.category.findMany({
-      orderBy: { sort: 'asc' },
-      include: { _count: { select: { dishes: true } } },
+    const categories = await query<any[]>(
+      `SELECT c.*, COUNT(d.id) as dishCount
+       FROM Category c
+       LEFT JOIN Dish d ON d.categoryId = c.id
+       GROUP BY c.id
+       ORDER BY c.sort ASC`
+    );
+    // 兼容前端 _count 结构：保留 _count: { dishes }，删除原始 dishCount 字段
+    const result = (categories || []).map(c => {
+      const { dishCount, ...rest } = c;
+      return { ...rest, _count: { dishes: Number(dishCount) } };
     });
-    res.json(categories);
-  } catch (error) {
+    res.json(result);
+  } catch (error: any) {
     console.error('获取分类失败:', error);
-    res.status(500).json({ error: '获取分类失败' });
+    res.status(500).json({ error: '获取分类失败', detail: error?.message || String(error) });
   }
 });
 
@@ -37,10 +45,14 @@ router.post('/', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const category = await prisma.category.create({ data: result.data });
-    res.status(201).json(category);
+    const r = await execute('INSERT INTO Category (name, sort) VALUES (?, ?)', [
+      result.data.name,
+      result.data.sort ?? 0,
+    ]);
+    const id = r.insertId;
+    res.status(201).json({ id, name: result.data.name, sort: result.data.sort ?? 0, createdAt: new Date() });
   } catch (error: any) {
-    if (error.code === 'P2002') {
+    if (error?.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: '分类名称已存在' });
     }
     console.error('创建分类失败:', error);
@@ -61,16 +73,28 @@ router.put('/:id', async (req: AuthRequest, res: Response) => {
   }
 
   try {
-    const category = await prisma.category.update({
-      where: { id },
-      data: result.data,
-    });
-    res.json(category);
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    const existing = await queryOne('SELECT id FROM Category WHERE id = ?', [id]);
+    if (!existing) {
       return res.status(404).json({ error: '分类不存在' });
     }
-    if (error.code === 'P2002') {
+
+    const sets: string[] = [];
+    const params: any[] = [];
+    if (result.data.name !== undefined) {
+      sets.push('name = ?');
+      params.push(result.data.name);
+    }
+    if (result.data.sort !== undefined) {
+      sets.push('sort = ?');
+      params.push(result.data.sort);
+    }
+    if (sets.length === 0) return res.json({ id });
+
+    params.push(id);
+    await execute(`UPDATE Category SET ${sets.join(', ')} WHERE id = ?`, params);
+    res.json({ id, ...result.data });
+  } catch (error: any) {
+    if (error?.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: '分类名称已存在' });
     }
     console.error('更新分类失败:', error);
@@ -87,17 +111,18 @@ router.delete('/:id', async (req: AuthRequest, res: Response) => {
 
   try {
     // 检查是否有菜品关联
-    const dishCount = await prisma.dish.count({ where: { categoryId: id } });
+    const row = await queryOne<any>('SELECT COUNT(*) as cnt FROM Dish WHERE categoryId = ?', [id]);
+    const dishCount = Number(row?.cnt ?? 0);
     if (dishCount > 0) {
       return res.status(409).json({ error: '该分类下有关联菜品，无法删除', dishCount });
     }
 
-    await prisma.category.delete({ where: { id } });
-    res.json({ message: '删除成功' });
-  } catch (error: any) {
-    if (error.code === 'P2025') {
+    const r = await execute('DELETE FROM Category WHERE id = ?', [id]);
+    if (r.affectedRows === 0) {
       return res.status(404).json({ error: '分类不存在' });
     }
+    res.json({ message: '删除成功' });
+  } catch (error: any) {
     console.error('删除分类失败:', error);
     res.status(500).json({ error: '删除分类失败' });
   }
