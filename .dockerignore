@@ -1,6 +1,9 @@
-.git
-.dockerignore
-Dockerfile*
-container.config.json
-LICENSE
-README.md
+# 依赖与构建产物不进镜像
+**/node_modules
+**/dist
+server/prisma/dev.db
+server/uploads
+server/.env
+**/.git
+**/*.log
+**/.DS_Store
