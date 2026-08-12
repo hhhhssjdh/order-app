@@ -6,6 +6,10 @@
 # ---- 阶段 1：构建 ----
 FROM node:20-slim AS builder
 
+# Prisma 需要 OpenSSL
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 先复制 package.json 安装依赖（利用 Docker 层缓存）
@@ -32,6 +36,10 @@ RUN cd server && npx prisma generate && npm run build
 # ---- 阶段 2：运行 ----
 FROM node:20-slim
 
+# Prisma 运行时依赖 OpenSSL
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 WORKDIR /app
 
@@ -52,5 +60,5 @@ WORKDIR /app/server
 
 EXPOSE 80
 
-# 启动前先同步数据库表结构，再启动服务
-CMD ["sh", "-c", "npx prisma db push --accept-data-loss --skip-generate && node dist/index.js"]
+# 启动前先同步数据库表结构（失败不阻断启动，便于排查），再启动服务
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss --skip-generate; echo '--- DB init done, starting app ---'; node dist/index.js"]
