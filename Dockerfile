@@ -1,64 +1,36 @@
-# ============================================================
-# 点餐系统 - 微信云托管部署镜像
-# 多阶段构建：阶段1 构建前端+编译后端；阶段2 精简运行
-# ============================================================
+# 二开推荐阅读[如何提高项目构建效率](https://developers.weixin.qq.com/miniprogram/dev/wxcloudrun/src/scene/build/speed.html)
+# 参照官方 wxcloudrun-express 模板，使用 alpine 血统镜像 + 国内镜像源
+FROM node:20-alpine
 
-# ---- 阶段 1：构建 ----
-FROM node:20-slim AS builder
+# 容器默认时区为UTC，启用上海时间
+RUN apk add --update --no-cache tzdata ca-certificates openssl \
+  && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+  && echo Asia/Shanghai > /etc/timezone
 
-# Prisma 需要 OpenSSL
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
+# 指定工作目录
 WORKDIR /app
 
-# 先复制 package.json 安装依赖（利用 Docker 层缓存）
-COPY server/package*.json ./server/
-COPY admin/package*.json ./admin/
-COPY client/package*.json ./client/
+# 拷贝包管理文件（先装依赖，利用缓存）
+COPY package*.json /app/
+COPY server/package*.json /app/server/
+COPY admin/package*.json /app/admin/
+COPY client/package*.json /app/client/
 
-RUN cd server && npm install --registry=https://mirrors.cloud.tencent.com/npm/
-RUN cd admin && npm install --registry=https://mirrors.cloud.tencent.com/npm/
-RUN cd client && npm install --registry=https://mirrors.cloud.tencent.com/npm/
+# npm 源，选用国内镜像源以提高下载速度
+RUN npm config set registry https://mirrors.cloud.tencent.com/npm/
 
-# 复制全部源码
-COPY server ./server
-COPY admin ./admin
-COPY client ./client
+# npm 安装依赖
+RUN cd /app/server && npm install --no-audit --no-fund
+RUN cd /app/admin && npm install --no-audit --no-fund
+RUN cd /app/client && npm install --no-audit --no-fund
 
-# 构建前端产物
-RUN cd client && npm run build
-RUN cd admin && npm run build
+# 将当前目录（dockerfile所在目录）下所有文件都拷贝到工作目录下（.dockerignore中文件除外）
+COPY . /app
 
-# 生成 Prisma Client 并编译后端
-RUN cd server && npx prisma generate && npm run build
+# 生成 Prisma Client、编译后端、构建前端产物
+RUN cd /app/server && npx prisma generate && npm run build
+RUN cd /app/client && npm run build
+RUN cd /app/admin && npm run build
 
-# ---- 阶段 2：运行 ----
-FROM node:20-slim
-
-# Prisma 运行时依赖 OpenSSL
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
-
-ENV NODE_ENV=production
-WORKDIR /app
-
-# 后端运行文件
-COPY --from=builder /app/server/dist ./server/dist
-COPY --from=builder /app/server/node_modules ./server/node_modules
-COPY --from=builder /app/server/prisma ./server/prisma
-COPY --from=builder /app/server/package.json ./server/package.json
-
-# 前端构建产物（由后端静态托管）
-COPY --from=builder /app/admin/dist ./admin/dist
-COPY --from=builder /app/client/dist ./client/dist
-
-# 上传目录（菜品图片，建议配置云托管持久化存储）
-RUN mkdir -p /app/server/uploads && chmod -R 777 /app/server/uploads
-
-WORKDIR /app/server
-
-EXPOSE 80
-
-# 启动前先同步数据库表结构（失败不阻断启动，便于排查），再启动服务
-CMD ["sh", "-c", "npx prisma db push --accept-data-loss --skip-generate; echo '--- DB init done, starting app ---'; node dist/index.js"]
+# 执行启动命令（npm start → 见根 package.json：先同步数据库表结构再启动）
+CMD ["npm", "start"]
