@@ -33,4 +33,5 @@ RUN cd /app/client && npm run build
 RUN cd /app/admin && npm run build
 
 # 执行启动命令（npm start → 见根 package.json：先同步数据库表结构再启动）
+ENV PORT=80
 CMD ["npm", "start"]

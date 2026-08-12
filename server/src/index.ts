@@ -13,7 +13,8 @@ import whitelistRouter from './controllers/whitelist';
 import uploadRouter from './controllers/upload';
 
 const app = express();
-const PORT = parseInt(process.env.PORT || '3001', 10);
+// 云托管不注入 PORT，约定 80；本地开发默认 3001
+const PORT = parseInt(process.env.PORT || (process.env.NODE_ENV === 'production' ? '80' : '3001'), 10);
 
 // 中间件
 app.use(cors());
@@ -57,22 +58,43 @@ if (fs.existsSync(clientDist)) {
 
 // 启动服务：先建库建表，无数据则自动初始化种子数据
 async function bootstrap() {
-  try {
-    // 等待建库建表完成（幂等）
-    await initDatabase();
+  // 云托管 MySQL 可能自动暂停（冷启动唤醒需要时间），重试连接
+  const MAX_RETRY = 10;
+  let lastError: string = '';
 
-    // 检查是否有数据
-    const categoryCount = await prisma.category.count().catch(() => -1);
-    if (categoryCount === -1) {
-      console.log('[init] 表结构未就绪，跳过自动初始化');
-    } else if (categoryCount === 0) {
-      console.log('[init] 数据库为空，自动初始化种子数据...');
-      await seedData();
-    } else {
-      console.log(`[init] 数据已存在 (${categoryCount} 个分类)，跳过初始化`);
+  for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+    try {
+      // 等待建库建表完成（幂等）
+      await initDatabase();
+      lastError = '';
+      break;
+    } catch (e: any) {
+      lastError = e?.message || JSON.stringify(e) || '未知错误';
+      console.error(`[db] 初始化第 ${attempt}/${MAX_RETRY} 次失败:`, lastError);
+      if (attempt < MAX_RETRY) {
+        await new Promise(r => setTimeout(r, 3000)); // 等3秒重试
+      }
     }
-  } catch (e) {
-    console.error('[init] 初始化检查失败:', (e as Error).message);
+  }
+
+  if (lastError) {
+    console.error('[db] 数据库初始化失败，请检查 MYSQL_* 环境变量和网络:', lastError);
+    // 数据库不可用也启动服务，避免健康检查一直失败（页面可见，API 会报错）
+  } else {
+    try {
+      // 检查是否有数据
+      const categoryCount = await prisma.category.count().catch(() => -1);
+      if (categoryCount === -1) {
+        console.log('[init] 表结构未就绪，跳过自动初始化');
+      } else if (categoryCount === 0) {
+        console.log('[init] 数据库为空，自动初始化种子数据...');
+        await seedData();
+      } else {
+        console.log(`[init] 数据已存在 (${categoryCount} 个分类)，跳过初始化`);
+      }
+    } catch (e: any) {
+      console.error('[init] 种子数据初始化失败:', e?.message || e);
+    }
   }
 
   app.listen(PORT, () => {
