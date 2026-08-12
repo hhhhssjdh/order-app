@@ -31,17 +31,19 @@ const PORT = parseInt(process.env.PORT || (process.env.NODE_ENV === 'production'
 ```
 Dockerfile 同时 `ENV PORT=80` 双保险。
 
-**2. 数据库：Prisma CLI 读不到 MYSQL_* 变量（最大坑）**
+**2. 数据库：绝不要用 Prisma，直接用 mysql2（最大坑）**
+- **Prisma 的 query engine 二进制在 alpine 容器里加载失败** → 所有数据库 API 500（界面正常、登录等不碰库的接口正常）
 - 云托管只注入 `MYSQL_ADDRESS/USERNAME/PASSWORD`，**没有 DATABASE_URL**
 - Prisma CLI（`prisma db push`）是独立进程，只认 `DATABASE_URL` → 会报 `Environment variable not found: DATABASE_URL`
-- **解法：不要用 prisma db push，改用 mysql2 直连自动建库建表**（见 `server/src/db.ts`）
+- **结论：微信云托管环境一律用 mysql2 原生 SQL，不要引入 Prisma**（本项目的完整实现见 `server/src/db.ts`）
 
 ```typescript
-// db.ts 核心：组装 URL + 自动建库建表（幂等）
+// db.ts 核心：mysql2 连接池 + 自动建库建表（幂等）
 export async function initDatabase(): Promise<void> {
   // 1. 连接不指定数据库，CREATE DATABASE IF NOT EXISTS (utf8mb4)
   // 2. 连接目标库，执行 CREATE TABLE IF NOT EXISTS（multipleStatements: true）
 }
+// 导出 query/queryOne/execute 助手，controller 全部用原生 SQL
 ```
 
 **3. 种子数据自动初始化：启动时检查空库**
@@ -115,13 +117,20 @@ CMD ["npm", "start"]          # 根 package.json: "start": "cd server && node di
 
 | 变量 | 来源 | 用途 |
 |---|---|---|
-| `MYSQL_ADDRESS` | 云托管自动注入 | 数据库地址 host:port |
-| `MYSQL_USERNAME` | 云托管自动注入 | 数据库用户 |
-| `MYSQL_PASSWORD` | 云托管自动注入 | 数据库密码 |
+| `MYSQL_ADDRESS` | **手动配置**（非自动注入） | 数据库地址 host:port |
+| `MYSQL_USERNAME` | **手动配置** | 数据库用户 |
+| `MYSQL_PASSWORD` | **手动配置** | 数据库密码 |
 | `MYSQL_DATABASE` | 可选，默认 `order_app` | 数据库名（代码自动创建） |
 | `PORT` | **不注入** | 生产默认 80 |
 | `JWT_SECRET` | 手动配置 | 建议补，有默认值 |
 | `COS_BUCKET/REGION/SECRET_ID/SECRET_KEY` | 云托管注入 | 图片云存储 |
+
+### ⚠️ 环境变量必须手动配置（成功部署的关键）
+- **云托管不会自动注入 MYSQL_* 变量！** 控制台里看到的 `MYSQL_ADDRESS` 等只是"环境信息"，不代表已配置进服务
+- 必须手动填入：**服务设置 → 环境变量**，逐个添加
+- **配置后必须重新部署**才会注入新容器
+- 验证：云托管 WebShell 执行 `echo $MYSQL_ADDRESS`
+- 未配置时代码 fallback 到 `localhost:3306` → 报 `connect ECONNREFUSED 127.0.0.1:3306`，看到这个错误 = 环境变量没配进去，不是代码问题
 
 ## 五、部署流程
 
@@ -135,13 +144,16 @@ CMD ["npm", "start"]          # 根 package.json: "start": "cd server && node di
 
 | 症状 | 原因 | 解法 |
 |---|---|---|
+| `connect ECONNREFUSED 127.0.0.1:3306` | **环境变量没配置进服务** | 服务设置→环境变量→重新部署 |
 | 健康检查 `connection refused` | 服务没起来（端口错/依赖缺失） | 看启动日志；确认端口 80 |
-| `Environment variable not found: DATABASE_URL` | prisma db push 读不到 MYSQL_* | 改用 mysql2 自动建表（见 db.ts） |
+| `Environment variable not found: DATABASE_URL` | prisma db push 读不到 MYSQL_* | **不要用 Prisma**，改用 mysql2 自动建表 |
+| 构建失败 `prisma generate not found` | Dockerfile 残留 Prisma 命令 | 移除 Prisma 后同步删 Dockerfile 的 prisma 步骤 |
 | `Prisma failed to detect libssl` | 缺 openssl | Dockerfile `apk add openssl` |
 | 日志 `Server running on port 3001` | 生产没默认 80 | `NODE_ENV=production` 时默认 80 |
 | MySQL 连接失败/超时 | serverless 冷启动暂停 | 重试 10 次间隔 3s |
 | 图片重启丢失 | 本地 uploads 不持久 | 配 COS 或 CFS 挂载 |
 | 页面打不开但服务在跑 | 域名/健康检查问题 | 先 curl `/api/categories` 验证 |
+| 所有 API 500 但界面正常 | Prisma 引擎加载失败 | 改用 mysql2 |
 
 ## 七、日志正确形态（部署成功的标志）
 
