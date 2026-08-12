@@ -27,8 +27,8 @@ RUN cd /app/client && npm install --no-audit --no-fund
 # 将当前目录（dockerfile所在目录）下所有文件都拷贝到工作目录下（.dockerignore中文件除外）
 COPY . /app
 
-# 生成 Prisma Client、编译后端、构建前端产物
-RUN cd /app/server && npx prisma generate && npm run build
+# 编译后端、构建前端产物
+RUN cd /app/server && npm run build
 RUN cd /app/client && npm run build
 RUN cd /app/admin && npm run build
 
