@@ -49,13 +49,16 @@ CREATE TABLE IF NOT EXISTS \`PhoneWhitelist\` (
 CREATE TABLE IF NOT EXISTS \`Order\` (
   \`id\` INTEGER NOT NULL AUTO_INCREMENT,
   \`tableNo\` VARCHAR(191) NOT NULL,
-  \`items\` VARCHAR(191) NOT NULL,
+  \`items\` MEDIUMTEXT NOT NULL,
   \`totalPrice\` DOUBLE NOT NULL,
   \`status\` VARCHAR(191) NOT NULL DEFAULT 'PENDING',
-  \`note\` VARCHAR(191) NOT NULL DEFAULT '',
+  \`note\` MEDIUMTEXT NOT NULL,
   \`createdAt\` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (\`id\`)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 兼容已存在的旧表（VARCHAR(191) → MEDIUMTEXT，幂等）
+ALTER TABLE \`Order\` MODIFY \`items\` MEDIUMTEXT NOT NULL, MODIFY \`note\` MEDIUMTEXT NOT NULL;
 `;
 
 // 初始化数据库：建库 + 建表（幂等，mysql2 直连，不依赖 Prisma CLI）
