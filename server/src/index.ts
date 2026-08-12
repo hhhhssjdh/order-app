@@ -3,7 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { authMiddleware } from './middleware/auth';
-import { prisma } from './db';
+import { prisma, initDatabase } from './db';
 import { seedData } from './seed';
 import authRouter from './controllers/auth';
 import categoryRouter from './controllers/category';
@@ -55,13 +55,16 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-// 启动服务：先确保数据库表存在，无数据则自动初始化种子数据
+// 启动服务：先建库建表，无数据则自动初始化种子数据
 async function bootstrap() {
   try {
-    // 等待自动建库完成，然后同步表结构
+    // 等待建库建表完成（幂等）
+    await initDatabase();
+
+    // 检查是否有数据
     const categoryCount = await prisma.category.count().catch(() => -1);
     if (categoryCount === -1) {
-      console.log('[init] 表结构未就绪，等待 prisma db push...');
+      console.log('[init] 表结构未就绪，跳过自动初始化');
     } else if (categoryCount === 0) {
       console.log('[init] 数据库为空，自动初始化种子数据...');
       await seedData();
