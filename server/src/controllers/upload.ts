@@ -5,6 +5,28 @@ import sharp from 'sharp';
 import fs from 'fs';
 import { AuthRequest } from '../middleware/auth';
 
+// COS 云存储（微信云托管环境变量），未配置密钥时回退本地存储
+const COS_BUCKET = process.env.COS_BUCKET;
+const COS_REGION = process.env.COS_REGION;
+const COS_SECRET_ID = process.env.COS_SECRET_ID;
+const COS_SECRET_KEY = process.env.COS_SECRET_KEY;
+const useCOS = !!(COS_BUCKET && COS_REGION && COS_SECRET_ID && COS_SECRET_KEY);
+
+let cosClient: any = null;
+if (useCOS) {
+  // 动态引入，避免未配置时安装失败
+  try {
+    const COS = require('cos-nodejs-sdk-v5');
+    cosClient = new COS({
+      SecretId: COS_SECRET_ID,
+      SecretKey: COS_SECRET_KEY,
+    });
+    console.log('[upload] 已启用 COS 云存储');
+  } catch (e) {
+    console.error('[upload] COS SDK 加载失败，回退本地存储:', (e as Error).message);
+  }
+}
+
 const router = Router();
 
 // 允许的 MIME 类型
@@ -17,7 +39,7 @@ const originalDir = path.join(uploadsDir, 'original');
 const thumbDir = path.join(uploadsDir, 'thumb');
 [originalDir, thumbDir].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
 
-// multer 配置 - 存到 original 目录
+// multer 配置 - 存到 original 目录（临时）
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, originalDir),
   filename: (_req, file, cb) => {
@@ -41,6 +63,29 @@ const upload = multer({
     cb(null, true);
   },
 });
+
+// 上传到 COS
+function uploadToCOS(filePath: string, cosKey: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!cosClient || !COS_BUCKET) {
+      reject(new Error('COS 未配置'));
+      return;
+    }
+    cosClient.putObject(
+      {
+        Bucket: COS_BUCKET,
+        Region: COS_REGION,
+        Key: cosKey,
+        Body: fs.createReadStream(filePath),
+        ContentType: 'image/jpeg',
+      },
+      (err: Error | null) => {
+        if (err) reject(err);
+        else resolve(`https://${COS_BUCKET}.cos.${COS_REGION}.myqcloud.com/${cosKey}`);
+      }
+    );
+  });
+}
 
 // POST /api/upload - 上传图片，返回原图和缩略图 URL
 router.post('/', (req: AuthRequest, res: Response) => {
@@ -71,6 +116,17 @@ router.post('/', (req: AuthRequest, res: Response) => {
         .resize(300, 300, { fit: 'inside', withoutEnlargement: true })
         .toFile(thumbPath);
 
+      // COS 模式：上传原图和缩略图，返回 https URL
+      if (useCOS && cosClient) {
+        const originalUrl = await uploadToCOS(originalPath, `original/${filename}`);
+        const thumbUrl = await uploadToCOS(thumbPath, `thumb/${thumbFilename}`);
+        // 清理本地临时文件
+        try { fs.unlinkSync(originalPath); } catch {}
+        try { fs.unlinkSync(thumbPath); } catch {}
+        return res.json({ original: originalUrl, thumb: thumbUrl });
+      }
+
+      // 本地模式
       res.json({
         original: `/uploads/original/${filename}`,
         thumb: `/uploads/thumb/${thumbFilename}`,

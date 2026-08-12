@@ -3,6 +3,8 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { authMiddleware } from './middleware/auth';
+import { prisma } from './db';
+import { seedData } from './seed';
 import authRouter from './controllers/auth';
 import categoryRouter from './controllers/category';
 import dishRouter from './controllers/dish';
@@ -53,7 +55,26 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-// 启动服务
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// 启动服务：先确保数据库表存在，无数据则自动初始化种子数据
+async function bootstrap() {
+  try {
+    // 等待自动建库完成，然后同步表结构
+    const categoryCount = await prisma.category.count().catch(() => -1);
+    if (categoryCount === -1) {
+      console.log('[init] 表结构未就绪，等待 prisma db push...');
+    } else if (categoryCount === 0) {
+      console.log('[init] 数据库为空，自动初始化种子数据...');
+      await seedData();
+    } else {
+      console.log(`[init] 数据已存在 (${categoryCount} 个分类)，跳过初始化`);
+    }
+  } catch (e) {
+    console.error('[init] 初始化检查失败:', (e as Error).message);
+  }
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+bootstrap();

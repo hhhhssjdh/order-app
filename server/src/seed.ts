@@ -6,7 +6,7 @@ interface DishDef {
   duration: number;   // minutes
 }
 
-async function main() {
+export async function seedData() {
   // 清空旧数据
   await prisma.order.deleteMany();
   await prisma.dish.deleteMany();
@@ -1121,4 +1121,7 @@ async function main() {
   console.log(`Seed data created: ${allDishes.length} dishes in 5 categories`);
 }
 
-main().catch(e => { console.error(e); process.exit(1); }).finally(() => prisma.$disconnect());
+// 命令行直接运行: npx tsx src/seed.ts
+if (require.main === module) {
+  seedData().catch(e => { console.error(e); process.exit(1); }).finally(() => prisma.$disconnect());
+}
